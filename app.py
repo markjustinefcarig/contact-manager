@@ -1,268 +1,221 @@
-import requests
+from flask import Flask, jsonify, request
+import mysql.connector
+from mysql.connector import Error
+from dotenv import load_dotenv
+import os
 
-# API Configuration
-BASE_URL = "http://localhost:5000/api/"
+load_dotenv()
 
+app = Flask(__name__)
 
-def display_menu():
-    print("\n" + "=" * 50)
-    print("contact_manager".center(50))
-    print("=" * 50)
-    print("1. Add new contact")
-    print("2. Edit contact details")
-    print("3. Delete contact")
-    print("5. Filter by relation")
-    print("6. Export contacts")
-    print("7. List all contacts")
-    print("8. Exit")
-    print("=" * 50)
+db_config = {
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME')
+}
 
-
-def list_contacts():
+def get_db_connection():
     try:
-        response = requests.get(f"{BASE_URL}/contacts")
-        if response.status_code != 200:
-            print(f"\nError: {response.text}")
-            return
+        connection = mysql.connector.connect(**db_config)
+        return connection
+    except Error as e:
+        print(f"Database connection failed: {e}")
+        return None
 
-        contacts = response.json()
-        if not contacts:
-            print("\nNo contacts found.")
-            return
+@app.route('/api/contacts', methods=['GET'])
+def get_contacts():
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
 
-        print("\nContact List:")
-        print("-" * 130)
-        print(f"{'ID':<5}{'Name':<30}{'Phone':<15}{'Email':<20}{'Address':<20}{'Relation':<20}{'Notes':<20}")
-        print("-" * 130)
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM contacts")
+    contacts = cursor.fetchall()
+    cursor.close()
+    connection.close()
+    return jsonify(contacts)
 
-        for contact in contacts:
-            raw_phone = contact.get('phone', '')
-            phone = str(int(float(raw_phone))) if isinstance(raw_phone, (int, float)) else str(raw_phone)
-            print(
-                f"{str(contact.get('id', '')):<5}"
-                f"{str(contact.get('name', ''))[:30]:<30}"
-                f"{phone[:15]:<15}"
-                f"{str(contact.get('email', '') or '')[:20]:<50}"
-                f"{str(contact.get('address', '') or '')[:20]:<30}"
-                f"{str(contact.get('relation', '') or '')[:20]:<30}"
-                f"{str(contact.get('notes', '') or '')[:20]:<20}"
-            )
-        print("-" * 130)
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
-
-
-def view_contact():
-    contact_id = input("\nEnter contact ID: ")
-    try:
-        response = requests.get(f"{BASE_URL}/contacts/{contact_id}")
-        if response.status_code == 200:
-            contact = response.json()
-            print("\n" + "-" * 50)
-            print("CONTACT DETAILS".center(50))
-            print("-" * 50)
-            print(f"ID: {contact['id']}")
-            print(f"Name: {contact['name']}")
-            print(f"Phone: {contact['phone']}")
-            print(f"Email: {contact.get('email', 'N/A')}")
-            print(f"Address: {contact.get('address', 'N/A')}")
-            print(f"Relation: {contact.get('relation', 'N/A')}")
-            print(f"Notes: {contact.get('notes', 'N/A')}")
-            print("-" * 50)
-        elif response.status_code == 404:
-            print("\nContact not found!")
-        else:
-            print(f"\nError: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
-
-
+@app.route('/api/contacts', methods=['POST'])
 def add_contact():
-    print("\nEnter contact details:")
-    name = input("Name: ")
-    phone = input("Phone: ")
-    email = input("Email: ")
-    address = input("Address: ")
-    relation = input("Relation: ")
-    notes = input("Notes: ")
+    data = request.json
+    if not data or 'name' not in data or 'email' not in data:
+        return jsonify({'error': 'Missing required fields (name, email)'}), 400
 
-    if not name or not phone:
-        print("\nName and phone are required!")
-        return
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
 
     try:
-        phone = int(phone)
-    except ValueError:
-        print("\nPhone must be a number!")
-        return
+        cursor = connection.cursor()
+        cursor.execute(
+            "INSERT INTO contacts (name, email, phone, relation, notes, address) VALUES (%s, %s, %s, %s, %s, %s)",
+            (
+                data['name'], 
+                data['email'], 
+                data.get('phone', None), 
+                data.get('relation', None),  
+                data.get('notes', None),
+                data.get('address', None)
+            )
+        )
+        connection.commit()
+        contact_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
 
-    contact_data = {
-        "name": name,
-        "phone": phone,
-        "email": email,
-        "address": address,
-        "relation": relation,
-        "notes": notes
-    }
+        return jsonify({
+            'id': contact_id,
+            'name': data['name'],
+            'email': data['email'],
+            'phone': data.get('phone'),
+            'address': data.get('address'),
+            'relation': data.get('relation'), 
+            'notes': data.get('notes'),
+        }), 201
+    except Error as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/contacts/<int:id>', methods=['GET'])
+def get_contact(id):
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM contacts WHERE id = %s", (id,))
+    contact = cursor.fetchone()
+    cursor.close()
+    connection.close()
+
+    if not contact:
+        return jsonify({'error': 'Contact not found'}), 404
+
+    return jsonify(contact)
+
+@app.route('/api/contacts/<int:id>', methods=['PUT'])
+def update_contact(id):
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
 
     try:
-        response = requests.post(f"{BASE_URL}/contacts", json=contact_data)
-        if response.status_code == 201:
-            print("\nContact added successfully!")
-            print(f"New contact ID: {response.json()['id']}")
-        else:
-            print(f"\nError adding contact: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
-
-
-def edit_contact_details():
-    contact_id = input("\nEnter contact ID to edit: ")
-
-    try:
-        response = requests.get(f"{BASE_URL}/contacts/{contact_id}")
-        if response.status_code != 200:
-            print(f"\nError: {response.text if response.status_code != 404 else 'Contact not found!'}")
-            return
-
-        current_contact = response.json()
-
-        print("\nCurrent contact details:")
-        for key in ['id', 'name', 'phone', 'email', 'address', 'relation', 'notes']:
-            print(f"{key.capitalize()}: {current_contact.get(key, 'N/A')}")
-        print("-" * 50)
-
-        print("\nEnter new values (leave blank to keep current):")
-        updates = {}
-        for field in ['name', 'phone', 'email', 'address', 'relation', 'notes']:
-            value = input(f"New {field}: ")
-            if value:
-                updates[field] = value
+        cursor = connection.cursor()
+        updates = []
+        values = []
+        if 'name' in data:
+            updates.append("name = %s")
+            values.append(data['name'])
+        if 'email' in data:
+            updates.append("email = %s")
+            values.append(data['email'])
+        if 'phone' in data:
+            updates.append("phone = %s")
+            values.append(data['phone'])
+        if 'address' in data:
+            updates.append("address = %s")
+            values.append(data['address'])    
+        if 'relation' in data:  
+            updates.append("relation = %s")
+            values.append(data['relation'])
+        if 'notes' in data:
+            updates.append("notes = %s")
+            values.append(data['notes'])
 
         if not updates:
-            print("\nNo changes made!")
-            return
+            return jsonify({'error': 'No valid fields to update'}), 400
 
-        response = requests.put(f"{BASE_URL}/contacts/{contact_id}", json=updates)
-        if response.status_code == 200:
-            print("\nContact updated successfully!")
-        else:
-            print(f"\nError updating contact: {response.text}")
+        query = f"UPDATE contacts SET {', '.join(updates)} WHERE id = %s"
+        values.append(id)
+        cursor.execute(query, tuple(values))
 
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Contact not found'}), 404
 
+        connection.commit()
+        cursor.close()
+        connection.close()
 
-def delete_contact():
-    contact_id = input("\nEnter contact ID to delete: ")
-    confirm = input(f"Are you sure you want to delete contact {contact_id}? (y/n): ")
-    if confirm.lower() != 'y':
-        print("Deletion cancelled.")
-        return
+        return jsonify({'message': 'Contact updated successfully'}), 200
+    except Error as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/contacts/<int:id>', methods=['DELETE'])
+def delete_contact(id):
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
 
     try:
-        response = requests.delete(f"{BASE_URL}/contacts/{contact_id}")
-        if response.status_code == 200:
-            print("\nContact deleted successfully!")
-        else:
-            print(f"\nError deleting contact: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM contacts WHERE id = %s", (id,))
 
+        if cursor.rowcount == 0:
+            return jsonify({'error': 'Contact not found'}), 404
 
-def search_contacts():
-    search_term = input("\nEnter name to search: ")
-    try:
-        response = requests.get(f"{BASE_URL}/contacts/search", params={"name": search_term})
-        if response.status_code == 200:
-            contacts = response.json()
-            if not contacts:
-                print("\nNo contacts found!")
-                return
+        connection.commit()
+        cursor.close()
+        connection.close()
 
-            print("\n" + "-" * 130)
-            print(f"{'ID':<5}{'Name':<30}{'Phone':<15}{'Email':<20}{'Address':<20}{'Relation':<20}{'Notes':<20}")
-            print("-" * 130)
-            for contact in contacts:
-                print(
-                    f"{contact['id']:<5}{contact['name']:<30}{contact['phone']:<15}"
-                    f"{contact.get('email', '')[:20]:<20}{contact.get('address', '')[:20]:<20}"
-                    f"{contact.get('relation', '')[:20]:<20}{contact.get('notes', '')[:20]:<20}"
-                )
-            print("-" * 130)
-        else:
-            print(f"\nError fetching contacts: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
+        return jsonify({'message': 'Contact deleted successfully'}), 200
+    except Error as e:
+        return jsonify({'error': str(e)}), 500
 
-
+@app.route('/api/contacts/filter', methods=['GET'])
 def filter_by_relation():
-    relation = input("\nEnter relation to filter by: ")
-    try:
-        response = requests.get(f"{BASE_URL}/contacts/filter", params={"relation": relation})
-        if response.status_code == 200:
-            contacts = response.json()
-            if not contacts:
-                print("\nNo contacts found!")
-                return
+    relation = request.args.get('relation')  # Get the relation query parameter
 
-            print("\n" + "-" * 130)
-            print(f"{'ID':<5}{'Name':<30}{'Phone':<15}{'Email':<20}{'Address':<20}{'Relation':<20}{'Notes':<20}")
-            print("-" * 130)
-            for contact in contacts:
-                print(
-                    f"{contact['id']:<5}{contact['name']:<30}{contact['phone']:<15}"
-                    f"{contact.get('email', '')[:20]:<20}{contact.get('address', '')[:20]:<20}"
-                    f"{contact.get('relation', '')[:20]:<20}{contact.get('notes', '')[:20]:<20}"
-                )
-            print("-" * 130)
-        else:
-            print(f"\nError fetching contacts: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
+    if not relation:
+        return jsonify({'error': 'Relation parameter is required'}), 400
 
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
 
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute("SELECT * FROM contacts WHERE relation LIKE %s", (f'%{relation}%',))  # Filter by relation
+    contacts = cursor.fetchall()
+    cursor.close()
+    connection.close()
+
+    if not contacts:
+        return jsonify({'message': 'No contacts found with the specified relation'}), 404
+
+    return jsonify(contacts), 200
+
+@app.route('/api/contacts/export', methods=['GET'])
 def export_contacts():
-    file_name = input("\nEnter file name to export contacts (e.g., contacts.json): ")
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+
     try:
-        response = requests.get(f"{BASE_URL}/contacts/export")
-        if response.status_code == 200:
-            with open(file_name, 'w') as file:
-                file.write(response.text)
-            print(f"\nContacts exported successfully to {file_name}!")
-        else:
-            print(f"\nError exporting contacts: {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"\nConnection error: {e}")
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM contacts")
+        contacts = cursor.fetchall()
+        cursor.close()
+        connection.close()
+
+        if not contacts:
+            return jsonify({'error': 'No contacts available to export'}), 404
+
+        import json
+        contacts_json = json.dumps(contacts, default=str)
+
+        return app.response_class(
+            contacts_json,
+            mimetype='application/json',
+            headers={"Content-Disposition": "attachment;filename=contacts.json"}
+        )
+
+    except Error as e:
+        return jsonify({'error': str(e)}), 500
 
 
-def main():
-    while True:
-        display_menu()
-        choice = input("\nEnter your choice (1-8): ")
 
-        if choice == '1':
-            add_contact()
-        elif choice == '2':
-            edit_contact_details()
-        elif choice == '3':
-            delete_contact()
-        elif choice == '4':
-            search_contacts()
-        elif choice == '5':
-            filter_by_relation()
-        elif choice == '6':
-            export_contacts()
-        elif choice == '7':
-            list_contacts()
-        elif choice == '8':
-            print("\nExiting the program. Goodbye!")
-            break
-        else:
-            print("\nInvalid choice! Please enter a number between 1 and 8.")
-
-        input("\nPress Enter to continue...")
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    app.run(debug=True)
